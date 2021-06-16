@@ -49,8 +49,6 @@ int push(Queue *q, void *job) {
 
     next_job->next = NULL;
     next_job->data = job;
-
-    TRY_ADDING_TO_QUEUE:
     if (q->size < q->curr_size) {
         /* If both head and tail are NULL before this insertion */
         if (NULL == q->tail)
