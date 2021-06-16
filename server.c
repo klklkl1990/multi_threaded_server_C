@@ -37,7 +37,8 @@ int wait_count;
 Queue * wait_queue;
 int algorithm, threadid;
 
-void getargs(int *port, int *threads, int *buffers, int *alg, int argc, char *argv[])
+void
+getargs(int *port, int *threads, int *buffers, int *alg, int argc, char *argv[])
 {
     if (argc != 5) {
         fprintf(stderr, "Usage: %s <port>\n", argv[0]);
