@@ -1,5 +1,6 @@
 #ifndef __REQUEST_H__
 
+#include "pcqueue.h"
 typedef struct {
     int id, count, statics, dynamics;
 } thread;

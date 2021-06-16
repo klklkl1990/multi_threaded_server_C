@@ -10,51 +10,69 @@
 // Repeatedly handles HTTP requests sent to this port number.
 // Most of the work is done within routines written in request.c
 //
+#define BLOCK 1
+#define DROPTAIL 2
+#define DROPHEAD 3
+#define RANDOM 4
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t fill = PTHREAD_COND_INITIALIZER;
 pthread_cond_t empty = PTHREAD_COND_INITIALIZER;
 
 //the threadpool
-pthread_t **cid;
+pthread_t **thread_pool;
 
 typedef struct {
     int fd;
     long size, arrival, dispatch;
 } request;
 
-typedef struct {
-    int requests;
-    int fillptr;
-    request **buffer;
-} epoch;
 
-epoch **epochs;
-request **buffer;
-int fillptr, useptr, max, numfull, algorithm, threadid;
+int total_limit ;
+int wait_limit;
+int total_count;
+int work_count;
+int wait_count;
+
+Queue * wait_queue;
+int algorithm, threadid;
 
 void getargs(int *port, int *threads, int *buffers, int *alg, int argc, char *argv[])
 {
     if (argc != 5) {
-        if(argc != 6 || strcmp(argv[4], "SFF-BS")) {
-            fprintf(stderr, "Usage: %s <port> <threads> <buffers> <schedalg> [N (for SFF-BS only)]\n", argv[0]);
-            exit(1);
-        }
+        fprintf(stderr, "Usage: %s <port>\n", argv[0]);
+        exit(1);
+    }
+    if (atoi(argv[2]) <= 0) {
+        fprintf(stderr, "Number of threads should be greater than 0!\n");
+        exit(1);
+    }
+    if (atoi(argv[3]) <= 0) {
+        fprintf(stderr, "Buffer size should be greater than 0!\n");
+        exit(1);
+    }
+    if (strcmp(argv[4], "dh") != 0
+        && strcmp(argv[4], "dt") != 0
+        && strcmp(argv[4], "block") != 0
+        && strcmp(argv[4], "random") != 0) {
+        fprintf(stderr, "Buffer overload handle type not recognized!\n");
+        exit(1);
+
     }
     *port = atoi(argv[1]);
     *threads = atoi(argv[2]);
     *buffers = atoi(argv[3]);
-    if(strcasecmp(argv[4], "FIFO") == 0) {
-        *alg = -2;
+    if(strcasecmp(argv[4], "block") == 0) {
+        *alg = BLOCK;
     }
-    else if(strcasecmp(argv[4], "SFF") == 0) {
-        *alg = -1;
+    else if(strcasecmp(argv[4], "dt") == 0) {
+        *alg = DROPTAIL;
     }
-    else if(strcasecmp(argv[4], "SFF-BS") == 0 && atoi(argv[5]) > 0) {
-        *alg = atoi(argv[5]);
+    else if(strcasecmp(argv[4], "dh") == 0) {
+        *alg = DROPHEAD;
     }
     else {
-        fprintf(stderr, "Usage: %s <port> <threads> <buffers> <schedalg> [N (for SFF-BS only)]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <port>]\n", argv[0]);
         exit(1);
     }
 }
@@ -73,60 +91,28 @@ void *consumer(void *arg) {
     struct timeval dispatch;
     while(1) {
         pthread_mutex_lock(&lock);
-        while(numfull == 0) {
+        while(wait_count == 0) {
             pthread_cond_wait(&fill, &lock);
         }
 
         gettimeofday(&dispatch, NULL);
-
         if(worker.id < 0) {
             worker.id = threadid;
-            threadid++;
+            //????????????? threadid++;
         }
         worker.count++;
-
-        request *req;
-
-        //FIFO
-        if(algorithm == -2) {
-            req = (request *)buffer[useptr];
-            useptr = (useptr + 1) % max;
-        }
-            //SFF
-        else if(algorithm == -1) {
-            req = (request *)buffer[0];
-            buffer[0] = buffer[fillptr - 1];
-            if(fillptr > 1) {
-                qsort(buffer, fillptr, sizeof(*buffer), requestcmp);
-            }
-            fillptr--;
-        }
-            //SFF-BD
-        else {
-            epoch *epo = (epoch *)epochs[0];
-            req = (request *)epo->buffer[0];
-            epo->buffer[0] = epo->buffer[epo->fillptr - 1];
-            if(epo->fillptr > 1) {
-                qsort(epo->buffer, epo->fillptr, sizeof(*epo->buffer), requestcmp);
-            }
-            epo->fillptr--;
-
-            // Finished epoch
-            if(epo->fillptr == 0 && epo->requests >= algorithm && fillptr > 0) {
-                int i = 0;
-                for(i = 0; i < fillptr; i++) {
-                    epochs[i] = epochs[i + 1];
-                }
-                fillptr--;
-            }
-        }
+        //liads' adding
+        request *req= pop(wait_queue);
         req->dispatch = ((dispatch.tv_sec) * 1000 + dispatch.tv_usec/1000.0) + 0.5;
-        numfull--;
+        wait_count--;
+        work_count++;
 
         pthread_cond_signal(&empty);
         pthread_mutex_unlock(&lock);
 
         requestHandle(req->fd, req->arrival, req->dispatch, &worker);
+        work_count--;
+        total_count--;
         Close(req->fd);
 
     }
@@ -140,29 +126,21 @@ int main(int argc, char *argv[])
 
     getargs(&port, &threads, &buffers, &alg, argc, argv);
 
-    max = buffers;
-    numfull = fillptr = useptr = 0;
+    wait_limit = buffers;
+    total_limit = buffers;
     algorithm = alg;
-    // SFF-BS
-    if(alg > 0) {
-        epochs = malloc((buffers / alg) * sizeof(*epochs));
-    }
-        // FIFO or SFF
-    else {
-        buffer = malloc(buffers * sizeof(*buffer));
-    }
 
-
-    cid = malloc(threads*sizeof(*cid));
+    wait_queue = init_queue(wait_limit);
+    thread_pool = malloc(threads*sizeof(*thread_pool));
 
     int i;
     for(i = 0; i< threads; i++) {
-        cid[i] = malloc(sizeof(pthread_t));
-        pthread_create(cid[i], NULL, consumer, NULL);
+        thread_pool[i] = malloc(sizeof(pthread_t));
+        pthread_create(thread_pool[i], NULL, consumer, NULL);
     }
 
     //
-    // CS537: Create some threads...
+    // Create some threads...
     //
 
     listenfd = Open_listenfd(port);
@@ -172,55 +150,38 @@ int main(int argc, char *argv[])
         gettimeofday(&arrival, NULL);
 
         pthread_mutex_lock(&lock);
-        while(numfull == max) {
+        while(wait_count == wait_limit) {
             pthread_cond_wait(&empty, &lock);
         }
-
         request *req = malloc(sizeof(request));
-        //FIFO
-        if(alg == -2) {
-            buffer[fillptr] = req;
-            fillptr = (fillptr+1) % max;
-        }
-            //SFF
-        else if(alg == -1) {
-            req->size = requestFileSize(connfd);
-            buffer[fillptr] = req;
-            fillptr++;
-            if(fillptr > 1) {
-                qsort(buffer, fillptr, sizeof(*buffer), requestcmp);
-            }
-        }
-            //SFF-BD
-        else {
-            epoch *epo;
-            if(epochs[fillptr] == NULL) {
-                epo = malloc(sizeof(epoch));
-                epo->buffer = malloc(alg * sizeof(*epo->buffer));
-                epochs[fillptr] = epo;
-            }
-            else {
-                epo = epochs[fillptr];
-            }
-            req->size = requestFileSize(connfd);
-            epo->buffer[epo->fillptr] = req;
-            epo->fillptr++;
-            epo->requests++;
-            if(epo->fillptr > 1) {
-                qsort(epo->buffer, epo->fillptr, sizeof(*epo->buffer), requestcmp);
-            }
-
-            if(epo->requests >= alg) {
-                fillptr++;
-            }
-        }
+        if(!req)
+            return -1;
+        req->size = requestFileSize(connfd);
         req->fd = connfd;
         req->arrival = ((arrival.tv_sec) * 1000 + arrival.tv_usec/1000.0) + 0.5;
-        numfull++;
-
-        pthread_cond_signal(&fill);
-        pthread_mutex_unlock(&lock);
-
+        int flag = 0;
+        while (wait_count+work_count == total_limit) {
+            if (algorithm==BLOCK) {
+                pthread_cond_wait(&fill, &lock);
+            } else if (algorithm==DROPTAIL) {
+                Close(connfd);
+                pthread_mutex_unlock(&lock);
+                flag = 1;
+            } else if (algorithm==DROPHEAD) {
+                request * curr_req = pop(wait_queue);
+                Close(curr_req->fd);
+                free(curr_req);
+                wait_count--;
+                total_count--;
+            }
+        }
+        if(!flag) {
+            push(wait_queue, req);
+            wait_count++;
+            total_count++;
+            pthread_cond_signal(&fill);
+            pthread_mutex_unlock(&lock);
+        }
     }
 
 }
